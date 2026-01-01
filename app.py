@@ -58,20 +58,27 @@ class Split(Base):
     expense = relationship("Expense", back_populates="splits")
     user = relationship("User")
 
-# 初始化数据库
-# --- 修改开始 ---
-# 尝试从 Streamlit 密钥里读取云数据库地址
-db_url = st.secrets.get("DATABASE_URL")
+# ==========================================
+# 🚀 数据库连接优化版 (带缓存)
+# ==========================================
+@st.cache_resource(ttl="2h")
+def get_db_engine():
+    # 1. 优先尝试从云端 Secrets 获取
+    db_url = st.secrets.get("DATABASE_URL")
+    
+    # 2. 如果没有云端配置，回退到本地 SQLite (方便你在自己电脑调试)
+    if not db_url:
+        return create_engine('sqlite:///splitwise_pro.db', connect_args={'check_same_thread': False})
 
-if db_url:
-    # 适配 Supabase/Postgres 的连接格式
+    # 3. 修正 Supabase 链接格式
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
-    engine = create_engine(db_url)
-else:
-    # 如果没找到密钥（比如你在本地运行），还是用本地文件
-    engine = create_engine('sqlite:///splitwise_pro.db', connect_args={'check_same_thread': False})
-# --- 修改结束 ---
+    
+    # 4. 创建连接池 (优化并发)
+    return create_engine(db_url, pool_pre_ping=True, pool_size=5, max_overflow=10)
+
+# 获取带缓存的 engine
+engine = get_db_engine()
 
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
