@@ -410,29 +410,6 @@ elif nav == "📝 记一笔 (支出)":
                 st.error(f"当前总和: {sum(pcts)}%，必须等于 100%")
 
         elif split_method == "💵 具体金额":
-            st.info("💡 请直接输入每个人该付多少钱：")
-            # 优化：强制只用 3 列，防止人多时输入框被挤压消失
-            cols = st.columns(3) 
-            input_sum = 0
-            
-            for i, m in enumerate(members):
-                # 自动换行逻辑：0,1,2 在第一行，3,4,5 在第二行...
-                with cols[i % 3]:
-                    val = st.number_input(f"{m} 应付", min_value=0.0, step=1.0, key=f"exact_{m}")
-                    c = FinanceEngine.to_cents(val)
-                    if c > 0:
-                        ower_splits[m_ids[m]] = c
-                        input_sum += c
-            
-            # 实时帮你可以算差额，防止算错
-            diff = total_cents - input_sum
-            if diff != 0:
-                if diff > 0:
-                    st.warning(f"⚠️ 还有 {FinanceEngine.to_dollars(diff)} 元未分配")
-                else:
-                    st.error(f"🚫 多分了 {FinanceEngine.to_dollars(abs(diff))} 元")
-            else:
-                st.success("✅ 金额完美匹配")
             st.caption("手动输入应付金额")
             cols = st.columns(len(members))
             input_sum = 0
