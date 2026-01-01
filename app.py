@@ -1,118 +1,135 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
-# --- 页面设置 ---
-st.set_page_config(page_title="简易AA记账", page_icon="💰")
+# --- 页面配置 ---
+st.set_page_config(page_title="云端AA记账", page_icon="☁️")
 
-# --- 🔐 简单的登录保护 ---
+# --- 🔐 登录保护 (密码 8888) ---
 def check_password():
-    """如果不输入正确密码，就不能看账本"""
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
-
     if not st.session_state.password_correct:
-        st.title("🔒 请登录")
-        password = st.text_input("请输入房间密码", type="password")
+        pwd = st.text_input("请输入房间密码", type="password")
         if st.button("进入"):
-            # 设定密码为 8888 (你可以自己改)
-            if password == "8888":
+            if pwd == "8888":
                 st.session_state.password_correct = True
                 st.rerun()
-            else:
-                st.error("密码错误")
         return False
     return True
 
 if not check_password():
-    st.stop()  # 如果没登录，下面的代码都不运行
+    st.stop()
 
-# ==========================================
-# 下面是之前的记账逻辑，登录后才会显示
-# ==========================================
+# --- ☁️ 连接 Google Sheets ---
+# 使用 @st.cache_resource 保证只连接一次，不用每次刷新都连
+@st.cache_resource
+def get_google_sheet():
+    # 从 Streamlit Secrets 里读取钥匙信息
+    key_dict = json.loads(st.secrets["textkey"])
+    
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+    client = gspread.authorize(creds)
+    
+    # 打开你的表格 (请确保表格名字和这里一致！)
+    sheet = client.open("MySplitwiseDB") 
+    return sheet
 
-st.title("💰 简易AA记账神器")
+try:
+    sheet = get_google_sheet()
+    worksheet_users = sheet.worksheet("users")
+    worksheet_expenses = sheet.worksheet("expenses")
+except Exception as e:
+    st.error("无法连接数据库，请检查 Secrets 配置或表格分享权限。")
+    st.stop()
 
-# --- 1. 初始化数据 ---
-if 'users' not in st.session_state:
-    st.session_state.users = []
-if 'expenses' not in st.session_state:
-    st.session_state.expenses = []
+st.title("☁️ 云端同步记账")
+
+# --- 1. 读取数据 ---
+# 每次刷新页面，都从云端拉取最新数据
+users_data = worksheet_users.get_all_records()
+expenses_data = worksheet_expenses.get_all_records()
+
+user_list = [row['name'] for row in users_data]
 
 # --- 2. 侧边栏：添加用户 ---
 with st.sidebar:
-    st.header("1. 添加成员")
+    st.header("添加成员")
     new_user = st.text_input("输入名字")
-    if st.button("添加成员"):
-        if new_user and new_user not in st.session_state.users:
-            st.session_state.users.append(new_user)
+    if st.button("添加"):
+        if new_user and new_user not in user_list:
+            st.info("正在保存到云端...")
+            worksheet_users.append_row([new_user]) # 写入 Google Sheet
             st.success(f"已添加: {new_user}")
-        elif new_user in st.session_state.users:
+            st.rerun() # 刷新页面获取最新数据
+        elif new_user in user_list:
             st.warning("该成员已存在")
     
-    st.write("当前成员:", ", ".join(st.session_state.users))
-    
-    if st.button("重置所有数据"):
-        st.session_state.users = []
-        st.session_state.expenses = []
-        st.rerun()
+    st.write("当前成员:", ", ".join(user_list))
 
-# --- 3. 主界面：记录支出 ---
-st.header("2. 记录一笔支出")
+# --- 3. 记录支出 ---
+st.header("记录一笔支出")
 
-if len(st.session_state.users) < 2:
-    st.info("👈 请先在左侧侧边栏添加至少两名成员。")
+if len(user_list) < 2:
+    st.info("请先在侧边栏添加至少两名成员。")
 else:
     col1, col2, col3 = st.columns(3)
     with col1:
-        payer = st.selectbox("谁付的钱?", st.session_state.users)
+        payer = st.selectbox("谁付的钱?", user_list)
     with col2:
-        amount = st.number_input("金额 (元)", min_value=0.01, step=1.0)
+        amount = st.number_input("金额", min_value=0.01, step=1.0)
     with col3:
-        description = st.text_input("备注 (例如: 晚餐)")
+        description = st.text_input("备注")
 
-    beneficiaries = st.multiselect("谁参与了消费? (默认全员)", st.session_state.users, default=st.session_state.users)
+    beneficiaries = st.multiselect("谁参与了?", user_list, default=user_list)
 
     if st.button("添加账单"):
         if amount > 0 and beneficiaries:
-            expense = {
-                "payer": payer,
-                "amount": amount,
-                "for_whom": beneficiaries,
-                "desc": description
-            }
-            st.session_state.expenses.append(expense)
-            st.success("账单已记录！")
+            st.info("正在写入数据库...")
+            # 存入 Google Sheet: 支付人, 金额, 参与人(逗号拼起来), 备注
+            new_row = [payer, amount, ",".join(beneficiaries), description]
+            worksheet_expenses.append_row(new_row)
+            st.success("保存成功！")
+            st.rerun()
         else:
-            st.error("请输入金额并选择参与人。")
+            st.error("信息不完整")
 
-# --- 4. 显示账单列表 ---
-if st.session_state.expenses:
+# --- 4. 显示账单 ---
+if expenses_data:
     st.markdown("---")
-    st.subheader("📝 账单明细")
-    df = pd.DataFrame(st.session_state.expenses)
+    st.subheader("📝 历史账单")
+    df = pd.DataFrame(expenses_data)
     st.table(df)
 
-# --- 5. 核心算法：计算结果 ---
+# --- 5. 计算结果 ---
 st.markdown("---")
-st.header("3. 结算结果 (谁给谁钱)")
+st.header("💰 结算结果")
 
 if st.button("计算分账"):
-    balances = {u: 0.0 for u in st.session_state.users}
-    for exp in st.session_state.expenses:
-        paid_by = exp['payer']
-        total = exp['amount']
-        people = exp['for_whom']
-        if len(people) > 0:
-            split_amount = total / len(people)
-            balances[paid_by] += total
-            for person in people:
-                balances[person] -= split_amount
+    balances = {u: 0.0 for u in user_list}
+    
+    for exp in expenses_data:
+        p = exp['payer']
+        amt = float(exp['amount']) # 确保是数字
+        # 从字符串还原列表: "A,B,C" -> ['A', 'B', 'C']
+        peeps = exp['for_whom'].split(",") if isinstance(exp['for_whom'], str) else []
+        
+        if peeps:
+            split = amt / len(peeps)
+            balances[p] += amt
+            for person in peeps:
+                if person in balances: # 防止旧数据的用户被删导致报错
+                    balances[person] -= split
 
+    # 简易贪心算法
     creditors = []
     debtors = []
-    for person, amount in balances.items():
-        if amount > 0.01: creditors.append([person, amount])
-        elif amount < -0.01: debtors.append([person, amount])
+    for p, amt in balances.items():
+        if amt > 0.01: creditors.append([p, amt])
+        elif amt < -0.01: debtors.append([p, amt])
 
     creditors.sort(key=lambda x: x[1], reverse=True)
     debtors.sort(key=lambda x: x[1])
@@ -121,17 +138,17 @@ if st.button("计算分账"):
     i = 0
     j = 0
     while i < len(creditors) and j < len(debtors):
-        creditor_name, credit_amount = creditors[i]
-        debtor_name, debt_amount = debtors[j]
-        amount_to_pay = min(credit_amount, -debt_amount)
-        transactions.append(f"**{debtor_name}** 应支付给 **{creditor_name}**: {amount_to_pay:.2f} 元")
-        creditors[i][1] -= amount_to_pay
-        debtors[j][1] += amount_to_pay
+        c_name, c_amt = creditors[i]
+        d_name, d_amt = debtors[j]
+        pay = min(c_amt, -d_amt)
+        transactions.append(f"**{d_name}** 给 **{c_name}**: {pay:.2f}")
+        creditors[i][1] -= pay
+        debtors[j][1] += pay
         if creditors[i][1] < 0.01: i += 1
         if debtors[j][1] > -0.01: j += 1
             
     if not transactions:
-        st.success("账目已平，不需要转账！")
+        st.success("账目已平！")
     else:
-        for trans in transactions:
-            st.info(trans)
+        for t in transactions:
+            st.info(t)
