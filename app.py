@@ -2,14 +2,13 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Boolean, DateTime, BigInteger
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, joinedload
-from datetime import datetime, date
+from datetime import datetime
 import uuid
 import collections
 import heapq
-import time
 
 # ==========================================
-# 🏗️ 1. 数据库底层 (保持稳定)
+# 🏗️ 1. 数据库定义
 # ==========================================
 Base = declarative_base()
 
@@ -48,48 +47,27 @@ class Expense(Base):
 
 class Split(Base):
     __tablename__ = 'splits'
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     expense_id = Column(String, ForeignKey('expenses.id'))
     user_id = Column(String, ForeignKey('users.id'))
     paid_amount = Column(BigInteger, default=0)
     owed_amount = Column(BigInteger, default=0)
-    expense = relationship("Expense", back_populates="splits")
     user = relationship("User")
 
-# --- 连接池优化 ---
+# --- 数据库连接 (带缓存) ---
 @st.cache_resource
-def get_engine():
+def init_db():
     db_url = st.secrets.get("DATABASE_URL", "sqlite:///splitwise_pro.db")
-    if db_url.startswith("postgres://"):
-        db_url = db_url.replace("postgres://", "postgresql://", 1)
-    return create_engine(db_url, pool_pre_ping=True)
+    engine = create_engine(db_url, pool_pre_ping=True)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)
 
-engine = get_engine()
-Base.metadata.create_all(engine)
-Session = sessionmaker(bind=engine)
+SessionLocal = init_db()
 
 # ==========================================
-# 🧠 2. 核心逻辑 (带缓存优化)
+# 🧠 2. 核心逻辑引擎
 # ==========================================
-
-@st.cache_data(ttl=600)
-def fetch_balances(group_id):
-    """缓存余额计算，减少数据库压力"""
-    with Session() as s:
-        expenses = s.query(Expense).filter_by(group_id=group_id, is_deleted=False).options(joinedload(Expense.splits).joinedload(Split.user)).all()
-        balances = collections.defaultdict(int)
-        for exp in expenses:
-            for sp in exp.splits:
-                balances[sp.user.username] += (sp.paid_amount - sp.owed_amount)
-        return dict(balances)
-
-@st.cache_data(ttl=600)
-def fetch_groups():
-    """缓存群组列表"""
-    with Session() as s:
-        return s.query(Group).filter_by(is_deleted=False).options(joinedload(Group.members).joinedload(GroupMember.user)).all()
-
-class FinanceUtils:
+class FinanceEngine:
     @staticmethod
     def to_cents(amt): return int(round(float(amt) * 100))
     @staticmethod
@@ -123,196 +101,183 @@ class FinanceUtils:
         return txs
 
 # ==========================================
-# 🎨 3. UI 界面 (响应式优化)
+# 🎨 3. UI 界面 (零延迟版)
 # ==========================================
 st.set_page_config(page_title="SplitPro", layout="wide")
 
-# 侧边栏
+# 侧边栏：操作人管理
 with st.sidebar:
     st.title("💸 聚会分账系统")
-    with Session() as s:
-        all_users = s.query(User).all()
-        if not all_users:
+    with SessionLocal() as s:
+        all_u = s.query(User).all()
+        if not all_u:
             new_u = st.text_input("初始化成员")
-            if st.button("开始使用"):
+            if st.button("确定"):
                 s.add(User(id=str(uuid.uuid4()), username=new_u))
                 s.commit()
                 st.rerun()
             st.stop()
-        
-        curr_u_name = st.selectbox("当前操作人", [u.username for u in all_users])
-        curr_u = next(u for u in all_users if u.username == curr_u_name)
+        curr_u_name = st.selectbox("当前操作人", [u.username for u in all_u])
+        curr_u = next(u for u in all_u if u.username == curr_u_name)
     
     st.divider()
-    tab_nav = st.radio("导航", ["📊 统计中心", "📝 快速记账", "🤝 群组管理"])
+    # 模拟 app.py 的 Tab 导航，这是减少延迟的关键
+    nav = st.radio("功能导航", ["📊 仪表盘 & 历史", "📝 记一笔", "💸 还款结算", "🤝 群组设置"])
 
-# --- Tab 1: 统计与历史 ---
-if tab_nav == "📊 统计中心":
-    groups = fetch_groups()
-    if not groups:
-        st.info("去「群组管理」创建一个吧！")
-    else:
-        for grp in groups:
-            with st.container(border=True):
-                col_h1, col_h2 = st.columns([3, 1])
-                col_h1.subheader(f"📂 {grp.name}")
-                
-                # 余额与结算
-                bals = fetch_balances(grp.id)
-                txs = FinanceUtils.simplify(bals)
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("💰 结算方案")
-                    if not txs: st.write("✅ 账目已平")
-                    for t in txs:
-                        st.markdown(f"**{t['from']}** ➡ **{t['to']}** : :green[RM {FinanceUtils.to_dollars(t['amount'])}]")
-                
-                with c2:
-                    my_b = bals.get(curr_u.username, 0)
-                    st.metric("我的状况", f"RM {FinanceUtils.to_dollars(my_b)}", 
-                              delta="需收回" if my_b >=0 else "需支付", delta_color="normal")
+# --- 缓存数据读取 ---
+@st.cache_data(ttl=60)
+def get_data_cache():
+    with SessionLocal() as s:
+        grps = s.query(Group).filter_by(is_deleted=False).options(joinedload(Group.members).joinedload(GroupMember.user)).all()
+        # 预加载所有未删除的支出
+        exps = s.query(Expense).filter_by(is_deleted=False).options(joinedload(Expense.splits).joinedload(Split.user)).order_by(Expense.date.desc()).all()
+        return grps, exps
 
-                # 历史明细明细
-                with st.expander("🕒 历史记录与删除"):
-                    with Session() as s:
-                        exps = s.query(Expense).filter_by(group_id=grp.id, is_deleted=False).order_by(Expense.date.desc()).all()
-                        for e in exps:
-                            ec1, ec2, ec3 = st.columns([3, 1, 1])
-                            ec1.write(f"{e.date.strftime('%m/%d')} **{e.description}**")
-                            ec2.write(f"RM {FinanceUtils.to_dollars(e.amount)}")
-                            if ec3.button("🗑️", key=f"del_{e.id}"):
-                                s.query(Expense).filter_by(id=e.id).update({"is_deleted": True})
-                                s.commit()
-                                st.cache_data.clear()
-                                st.rerun()
+grps, all_exps = get_data_cache()
 
-# --- Tab 2: 记账逻辑 (修复核心痛点) ---
-elif tab_nav == "📝 快速记账":
-    st.header("📝 记录新支出")
-    groups = fetch_groups()
-    if not groups: st.stop()
+# --- 1. 仪表盘 ---
+if nav == "📊 仪表盘 & 历史":
+    st.header(f"👋 你好, {curr_u.username}")
+    if not grps: st.info("请先去「群组设置」创建群组")
     
-    g_sel = st.selectbox("选择群组", [g.name for g in groups])
-    grp = next(g for g in groups if g.name == g_sel)
-    m_names = [m.user.username for m in grp.members]
-    m_map = {m.user.username: m.user.id for m in grp.members}
-    
-    # 基本信息
-    row1 = st.columns(3)
-    desc = row1[0].text_input("消费内容", "晚餐")
-    amt_f = row1[1].number_input("总金额 (RM)", min_value=0.0, step=0.1)
-    cat = row1[2].selectbox("分类", ["餐饮", "交通", "购物", "娱乐", "其他"])
-    
-    total_c = FinanceUtils.to_cents(amt_f)
-    
-    # 1. 付款方 (支持多人)
-    st.divider()
-    st.subheader("1. 谁付的钱？")
-    p_mode = st.toggle("多人共同垫付", value=False)
-    p_splits = {}
-    if not p_mode:
-        pa = st.selectbox("付款人", m_names, index=m_names.index(curr_u.username) if curr_u.username in m_names else 0)
-        p_splits[m_map[pa]] = total_c
-    else:
-        p_cols = st.columns(len(m_names))
-        for i, m in enumerate(m_names):
-            v = p_cols[i].number_input(f"{m} 付", min_value=0.0, key=f"p_{m}")
-            if v > 0: p_splits[m_map[m]] = FinanceUtils.to_cents(v)
-
-    # 2. 分账模式 (彻底修复跳不出问题)
-    st.divider()
-    st.subheader("2. 怎么分？")
-    s_mode = st.radio("模式", ["均分", "按份数", "百分比", "具体金额"], horizontal=True)
-    
-    o_splits = {}
-    if s_mode == "均分":
-        target = st.multiselect("参与人", m_names, default=m_names)
-        if target:
-            amts = FinanceUtils.distribute(total_c, [1]*len(target))
-            for i, m in enumerate(target): o_splits[m_map[m]] = amts[i]
+    for g in grps:
+        with st.container(border=True):
+            st.subheader(f"📂 {g.name}")
+            # 计算余额
+            g_exps = [e for e in all_exps if e.group_id == g.id]
+            bals = collections.defaultdict(int)
+            for e in g_exps:
+                for sp in e.splits:
+                    bals[sp.user.username] += (sp.paid_amount - sp.owed_amount)
             
+            c1, c2 = st.columns(2)
+            with c1:
+                st.caption("💰 待结算")
+                txs = FinanceEngine.simplify(bals)
+                if not txs: st.write("账目已平")
+                for t in txs:
+                    st.markdown(f"**{t['from']}** ➡ **{t['to']}** : :green[RM {FinanceEngine.to_dollars(t['amount'])}]")
+            with c2:
+                my_b = bals.get(curr_u.username, 0)
+                st.metric("我的余额", f"RM {FinanceEngine.to_dollars(my_b)}", delta="收回" if my_b >=0 else "支付")
+            
+            # 历史记录列表 (带删除)
+            with st.expander("🕒 查看历史记录"):
+                for e in g_exps:
+                    col_e1, col_e2, col_e3 = st.columns([3,1,1])
+                    col_e1.write(f"{e.date.strftime('%m-%d')} **{e.description}** ({e.category})")
+                    col_e2.write(f"RM {FinanceEngine.to_dollars(e.amount)}")
+                    if col_e3.button("🗑️", key=f"del_{e.id}"):
+                        with SessionLocal() as s:
+                            s.query(Expense).filter_by(id=e.id).update({"is_deleted": True})
+                            s.commit()
+                            st.cache_data.clear()
+                            st.rerun()
+
+# --- 2. 记一笔 (修复模式跳不出) ---
+elif nav == "📝 记一笔":
+    st.header("📝 记录支出")
+    if not grps: st.stop()
+    
+    sel_g = st.selectbox("群组", [g.name for g in grps])
+    g_obj = next(g for g in grps if g.name == sel_g)
+    m_names = [m.user.username for m in g_obj.members]
+    m_map = {m.user.username: m.user.id for m in g_obj.members}
+    
+    # 基础信息
+    c_b1, c_b2, c_b3 = st.columns(3)
+    desc = c_b1.text_input("内容", "晚餐")
+    amt_f = c_b2.number_input("金额", min_value=0.0, step=0.1)
+    cat = c_b3.selectbox("分类", ["餐饮", "交通", "购物", "其他"])
+    total_c = FinanceEngine.to_cents(amt_f)
+    
+    st.write("---")
+    # 付款人逻辑
+    st.subheader("1. 谁付款？")
+    p_names = st.multiselect("选择付款人 (支持多人)", m_names, default=[curr_u_name])
+    p_splits = {}
+    if len(p_names) == 1:
+        p_splits[m_map[p_names[0]]] = total_c
+    else:
+        p_cols = st.columns(len(p_names))
+        for i, pn in enumerate(p_names):
+            v = p_cols[i].number_input(f"{pn}付", min_value=0.0, key=f"p_{pn}")
+            p_splits[m_map[pn]] = FinanceEngine.to_cents(v)
+
+    st.write("---")
+    # 分账逻辑 - 实时渲染
+    st.subheader("2. 怎么分？")
+    s_mode = st.radio("分账模式", ["均分", "按份数", "具体金额"], horizontal=True)
+    o_splits = {}
+    
+    if s_mode == "均分":
+        targets = st.multiselect("参与人", m_names, default=m_names)
+        if targets:
+            amts = FinanceEngine.distribute(total_c, [1]*len(targets))
+            for i, tn in enumerate(targets): o_splits[m_map[tn]] = amts[i]
     elif s_mode == "按份数":
         s_cols = st.columns(len(m_names))
-        weights = []
-        for i, m in enumerate(m_names):
-            w = s_cols[i].number_input(f"{m}(份)", min_value=0, value=1, key=f"s_{m}")
-            weights.append(w)
-        amts = FinanceUtils.distribute(total_c, weights)
-        for i, m in enumerate(m_names): o_splits[m_map[m]] = amts[i]
-
+        ws = [s_cols[i].number_input(f"{mn}(份)", 0, 10, 1, key=f"s_{mn}") for i, mn in enumerate(m_names)]
+        amts = FinanceEngine.distribute(total_c, ws)
+        for i, mn in enumerate(m_names): o_splits[m_map[mn]] = amts[i]
     elif s_mode == "具体金额":
         e_cols = st.columns(len(m_names))
         cur_sum = 0
-        for i, m in enumerate(m_names):
-            v = e_cols[i].number_input(f"{m}(RM)", min_value=0.0, key=f"e_{m}")
-            c = FinanceUtils.to_cents(v)
-            o_splits[m_map[m]] = c
-            cur_sum += c
-        if cur_sum != total_c:
-            st.warning(f"金额不平：差额 RM {FinanceUtils.to_dollars(total_c - cur_sum)}")
+        for i, mn in enumerate(m_names):
+            v = e_cols[i].number_input(f"{mn}(RM)", min_value=0.0, key=f"e_{mn}")
+            o_splits[m_map[mn]] = FinanceEngine.to_cents(v)
+            cur_sum += o_splits[m_map[mn]]
+        if cur_sum != total_c: st.warning(f"不平: 差 RM {FinanceEngine.to_dollars(total_c-cur_sum)}")
 
-    elif s_mode == "百分比":
-        pct_cols = st.columns(len(m_names))
-        pcts = []
-        for i, m in enumerate(m_names):
-            p = pct_cols[i].number_input(f"{m}(%)", min_value=0, max_value=100, key=f"pct_{m}")
-            pcts.append(p)
-        if sum(pcts) == 100:
-            amts = FinanceUtils.distribute(total_c, pcts)
-            for i, m in enumerate(m_names): o_splits[m_map[m]] = amts[i]
-        else:
-            st.error(f"总和必须为100%，当前 {sum(pcts)}%")
+    if st.button("✅ 记账", type="primary", use_container_width=True):
+        with SessionLocal() as s:
+            eid = str(uuid.uuid4())
+            s.add(Expense(id=eid, group_id=g_obj.id, created_by=curr_u.id, description=desc, amount=total_c, category=cat))
+            for uid in set(list(p_splits.keys()) + list(o_splits.keys())):
+                s.add(Split(expense_id=eid, user_id=uid, paid_amount=p_splits.get(uid,0), owed_amount=o_splits.get(uid,0)))
+            s.commit()
+            st.cache_data.clear()
+            st.rerun()
 
-    # 提交
-    if st.button("🚀 确认记账", type="primary", use_container_width=True):
-        if sum(p_splits.values()) != total_c:
-            st.error("付款总额不对")
-        elif sum(o_splits.values()) != total_c:
-            st.error("分摊总额不对")
-        else:
-            with Session() as s:
-                eid = str(uuid.uuid4())
-                s.add(Expense(id=eid, group_id=grp.id, created_by=curr_u.id, 
-                              description=desc, amount=total_c, category=cat, date=datetime.now()))
-                for uid in set(list(p_splits.keys()) + list(o_splits.keys())):
-                    s.add(Split(expense_id=eid, user_id=uid, 
-                               paid_amount=p_splits.get(uid,0), owed_amount=o_splits.get(uid,0)))
-                s.commit()
-                st.cache_data.clear()
-                st.balloons()
-                st.rerun()
-
-# --- Tab 3: 群组管理 (回归功能) ---
-elif tab_nav == "🤝 群组管理":
-    st.header("🤝 群组与成员")
+# --- 3. 还款功能 (核心回归) ---
+elif nav == "💸 还款结算":
+    st.header("💸 记录还款")
+    sel_g = st.selectbox("群组", [g.name for g in grps])
+    g_obj = next(g for g in grps if g.name == sel_g)
+    m_names = [m.user.username for m in g_obj.members]
+    m_map = {m.user.username: m.user.id for m in g_obj.members}
     
-    t1, t2 = st.tabs(["🆕 创建群组", "👥 成员管理"])
+    c1, c2, c3 = st.columns(3)
+    payer = c1.selectbox("谁给钱", m_names)
+    receiver = c2.selectbox("谁收钱", [n for n in m_names if n != payer])
+    amt = c3.number_input("还款金额", min_value=0.1)
     
-    with t1:
-        g_name = st.text_input("新群组名称")
-        with Session() as s:
-            users = s.query(User).all()
-            selected = st.multiselect("邀请成员", [u.username for u in users], default=[curr_u.username])
-            if st.button("创建群组", type="primary"):
-                if g_name and selected:
-                    gid = str(uuid.uuid4())
-                    s.add(Group(id=gid, name=g_name))
-                    for name in selected:
-                        uid = next(u.id for u in users if u.username == name)
-                        s.add(GroupMember(group_id=gid, user_id=uid))
-                    s.commit()
-                    st.cache_data.clear()
-                    st.success(f"群组 {g_name} 创建成功！")
-                    st.rerun()
+    if st.button("确认还款", type="primary"):
+        cents = FinanceEngine.to_cents(amt)
+        with SessionLocal() as s:
+            eid = str(uuid.uuid4())
+            # 还款本质：Payer 付了钱，Receiver 消耗了钱
+            s.add(Expense(id=eid, group_id=g_obj.id, created_by=m_map[payer], description=f"还款: {payer} -> {receiver}", amount=cents, category="还款"))
+            s.add(Split(expense_id=eid, user_id=m_map[payer], paid_amount=cents, owed_amount=0))
+            s.add(Split(expense_id=eid, user_id=m_map[receiver], paid_amount=0, owed_amount=cents))
+            s.commit()
+            st.cache_data.clear()
+            st.success("还款记录已保存")
+            st.rerun()
 
-    with t2:
-        st.subheader("添加新用户到系统")
-        new_user_name = st.text_input("用户名")
-        if st.button("添加用户"):
-            with Session() as s:
-                if not s.query(User).filter_by(username=new_user_name).first():
-                    s.add(User(id=str(uuid.uuid4()), username=new_user_name))
-                    s.commit()
-                    st.success("添加成功")
-                    st.rerun()
+# --- 4. 群组设置 ---
+elif nav == "🤝 群组设置":
+    st.subheader("创建新群组")
+    g_name = st.text_input("群名")
+    with SessionLocal() as s:
+        all_users = s.query(User).all()
+        selected = st.multiselect("选择成员", [u.username for u in all_users], default=[curr_u_name])
+        if st.button("创建"):
+            gid = str(uuid.uuid4())
+            s.add(Group(id=gid, name=g_name))
+            for name in selected:
+                uid = next(u.id for u in all_users if u.username == name)
+                s.add(GroupMember(group_id=gid, user_id=uid))
+            s.commit()
+            st.cache_data.clear()
+            st.rerun()
