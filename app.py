@@ -154,16 +154,31 @@ def with_session(func):
 class GroupService:
     @staticmethod
     @with_session
-    def create_group(session, name, user_ids):
+    def create_group(session, name, user_emails):
         try:
             grp = Group(id=str(uuid.uuid4()), name=name)
             session.add(grp)
-            # 自动把创建者也加入群组
-            if st.session_state.user_email not in user_ids:
-                user_ids.append(st.session_state.user_email)
+            
+            # 确保当前用户也在列表里
+            current_email = st.session_state.user_email
+            if current_email not in user_emails:
+                user_emails.append(current_email)
+            
+            # 核心逻辑：遍历邮箱，如果用户不存在，自动创建
+            for email in set(user_emails):
+                email = email.strip() # 去除空格
+                if not email: continue
                 
-            for uid in user_ids:
-                session.add(GroupMember(group_id=grp.id, user_id=uid))
+                # 检查用户是否存在，不存在则创建（利用 UserService 的逻辑）
+                # 注意：这里我们手动实现一下 ensure，因为在 session 内部调用 service 可能会有嵌套 session 问题
+                u = session.query(User).filter_by(id=email).first()
+                if not u:
+                    u = User(id=email, username=email.split('@')[0]) # 默认用邮箱前缀做用户名
+                    session.add(u)
+                
+                # 添加到群组
+                session.add(GroupMember(group_id=grp.id, user_id=email))
+            
             session.commit()
             return True, "创建成功"
         except Exception as e:
@@ -540,24 +555,45 @@ elif nav == "💸 还款 (结算)":
             st.rerun()
 
 # --- 4. 设置 ---
+# ... 之前的代码 ...
+
 elif nav == "⚙️ 设置":
     st.subheader("创建新群组")
     n_grp = st.text_input("群名")
     
-    # 获取其他用户以供邀请
+    # 方式 A: 从已存在的用户里选
     others = [u.username for u in all_users if u.id != current_u_email]
-    invites = st.multiselect("邀请成员", others)
+    invites_existing = st.multiselect("选择已注册成员", others)
+    
+    # 方式 B: 直接输入邮箱 (新增功能)
+    st.markdown("**或者直接输入朋友的 Google 邮箱 (一行一个):**")
+    invite_emails_raw = st.text_area("邮箱列表", placeholder="friend1@gmail.com\nfriend2@gmail.com")
     
     if st.button("建群"):
         if n_grp:
-            # 找到被邀请人的 ID
-            invite_uids = [u.id for u in all_users if u.username in invites]
-            # 自动包含自己 (current_u_email 在 GroupService 中处理)
-            GroupService.create_group(n_grp, invite_uids)
-            st.success("成功")
-            st.rerun()
+            # 1. 获取已选用户的邮箱 (ID)
+            selected_emails = [u.id for u in all_users if u.username in invites_existing]
             
+            # 2. 获取手填的邮箱
+            manual_emails = [e.strip() for e in invite_emails_raw.split('\n') if '@' in e]
+            
+            # 3. 合并所有邀请名单
+            final_invite_list = selected_emails + manual_emails
+            
+            # 调用升级版的 create_group
+            success, msg = GroupService.create_group(n_grp, final_invite_list)
+            
+            if success:
+                st.success(f"成功创建群组: {n_grp}")
+                time.sleep(1) # 给一点时间让数据写入
+                st.rerun()
+            else:
+                st.error(f"创建失败: {msg}")
+        else:
+            st.warning("请输入群名")
+
     st.divider()
+
     st.subheader("删除群组")
     if my_groups:
         del_g = st.selectbox("选择删除", [g.name for g in my_groups])
@@ -570,3 +606,4 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
+
