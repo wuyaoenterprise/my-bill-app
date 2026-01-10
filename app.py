@@ -421,7 +421,7 @@ elif nav == "📝 记一笔 (支出)":
         c1, c2, c3 = st.columns(3)
         desc = c1.text_input("消费内容", "聚餐")
         # key='total_amt' 用于后续自动计算
-        amt = c2.number_input("总金额", min_value=0.01, step=1.0, value=0.0, key='total_amt') 
+        amt = c2.number_input("总金额", min_value=0.0, step=1.0, value=0.0, key='total_amt')
         cat = c3.selectbox("分类", ["餐饮", "交通", "房租", "购物", "娱乐", "其他"])
         
         c4, c5 = st.columns(2)
@@ -632,5 +632,6 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
+
 
 
