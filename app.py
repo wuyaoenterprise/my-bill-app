@@ -300,27 +300,26 @@ if not CLIENT_ID or not CLIENT_SECRET:
     st.error("请先在 secrets.toml 配置 Google OAuth 信息")
     st.stop()
 
-# 1. 初始化 Cookie 管理器 (只需运行一次)
-@st.cache_resource(experimental_allow_widgets=True)
-def get_cookie_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_cookie_manager()
+# 1. 初始化 Cookie 管理器 (修复：去掉了报错的 @st.cache_resource)
+cookie_manager = stx.CookieManager()
 
 # 2. 尝试从 Cookie 获取登录信息
-cookie_email = cookie_manager.get(cookie="user_email")
-cookie_name = cookie_manager.get(cookie="user_name")
+# 注意：Cookie 读取有时需要一点时间，给个默认值防止报错
+cookies = cookie_manager.get_all()
+cookie_email = cookies.get("user_email") if cookies else None
+cookie_name = cookies.get("user_name") if cookies else None
 
 # 3. 登录逻辑判断
 if not st.session_state.get('user_email'):
-    # A. 如果 Cookie 里有数据，直接自动登录 (跳过按钮)
+    # A. 如果 Cookie 里有数据，直接自动登录
     if cookie_email and cookie_name:
         st.session_state.user_email = cookie_email
         st.session_state.user_name = cookie_name
         UserService.ensure_user_exists(cookie_email, cookie_name)
-        # 不用 rerun，直接向下执行即可
+        # 强制刷新一次以更新状态
+        st.rerun()
     
-    # B. 如果 Cookie 没数据，才显示 Google 登录按钮
+    # B. 如果 Cookie 没数据，显示 Google 登录按钮
     else:
         st.title("💸 聚会分账系统 - 登录")
         st.caption("请登录以查看属于您的私有数据")
@@ -342,7 +341,7 @@ if not st.session_state.get('user_email'):
             st.session_state.user_email = email
             st.session_state.user_name = name
             
-            # 🌟 关键：登录成功后，写入 Cookie (有效期 30 天)
+            # 🌟 写入 Cookie (有效期 30 天)
             cookie_manager.set("user_email", email, expires_at=datetime.now() + pd.Timedelta(days=30))
             cookie_manager.set("user_name", name, expires_at=datetime.now() + pd.Timedelta(days=30))
             
@@ -668,6 +667,7 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
+
 
 
 
