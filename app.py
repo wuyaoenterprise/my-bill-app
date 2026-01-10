@@ -300,32 +300,45 @@ if not CLIENT_ID or not CLIENT_SECRET:
     st.error("请先在 secrets.toml 配置 Google OAuth 信息")
     st.stop()
 
-# 1. 初始化 Cookie 管理器 (修复：去掉了报错的 @st.cache_resource)
-cookie_manager = stx.CookieManager()
+# 1. 初始化 Cookie 管理器 (增加 key 防止重绘冲突)
+@st.cache_resource(experimental_allow_widgets=True)
+def get_cookie_manager():
+    return stx.CookieManager(key="cookie_manager_instance")
 
-# 2. 尝试从 Cookie 获取登录信息
-# 注意：Cookie 读取有时需要一点时间，给个默认值防止报错
-cookies = cookie_manager.get_all()
-cookie_email = cookies.get("user_email") if cookies else None
-cookie_name = cookies.get("user_name") if cookies else None
+cookie_manager = get_cookie_manager()
 
-# 3. 登录逻辑判断
+# 2. 尝试读取 Cookie (加个 try-except 防止组件报错卡死)
+try:
+    cookie_email = cookie_manager.get(cookie="user_email")
+    cookie_name = cookie_manager.get(cookie="user_name")
+except Exception:
+    cookie_email = None
+    cookie_name = None
+
+# 3. 登录逻辑
 if not st.session_state.get('user_email'):
-    # A. 如果 Cookie 里有数据，直接自动登录
+    # A. 如果 Cookie 有值，自动登录
     if cookie_email and cookie_name:
         st.session_state.user_email = cookie_email
         st.session_state.user_name = cookie_name
         UserService.ensure_user_exists(cookie_email, cookie_name)
-        # 强制刷新一次以更新状态
-        st.rerun()
+        st.rerun() # 自动刷新进入
     
-    # B. 如果 Cookie 没数据，显示 Google 登录按钮
+    # B. 显示登录按钮
     else:
         st.title("💸 聚会分账系统 - 登录")
         st.caption("请登录以查看属于您的私有数据")
         
+        # 修复：给按钮加个 key，确保它能渲染出来
         oauth2 = OAuth2Component(CLIENT_ID, CLIENT_SECRET, "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://oauth2.googleapis.com/token", REDIRECT_URI)
-        result = oauth2.authorize_button(name="使用 Google 登录", scope="openid email profile", redirect_uri=REDIRECT_URI)
+        
+        # 这里的 key="google_login_btn" 很关键
+        result = oauth2.authorize_button(
+            name="使用 Google 登录", 
+            scope="openid email profile", 
+            redirect_uri=REDIRECT_URI,
+            key="google_login_btn" 
+        )
         
         if result and result.get("token"):
             import base64, json
@@ -341,7 +354,7 @@ if not st.session_state.get('user_email'):
             st.session_state.user_email = email
             st.session_state.user_name = name
             
-            # 🌟 写入 Cookie (有效期 30 天)
+            # 写入 Cookie
             cookie_manager.set("user_email", email, expires_at=datetime.now() + pd.Timedelta(days=30))
             cookie_manager.set("user_name", name, expires_at=datetime.now() + pd.Timedelta(days=30))
             
@@ -667,6 +680,7 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
+
 
 
 
