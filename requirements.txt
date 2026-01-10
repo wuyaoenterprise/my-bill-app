@@ -3,3 +3,4 @@ pandas
 sqlalchemy
 psycopg2-binary
 streamlit-oauth
+extra-streamlit-components
