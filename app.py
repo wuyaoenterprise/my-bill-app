@@ -300,8 +300,8 @@ if not CLIENT_ID or not CLIENT_SECRET:
     st.error("请先在 secrets.toml 配置 Google OAuth 信息")
     st.stop()
 
-# 1. 初始化 Cookie 管理器 (增加 key 防止重绘冲突)
-@st.cache_resource(experimental_allow_widgets=True)
+# 1. 初始化 Cookie 管理器 (🌟 修复点：去掉了 experimental_allow_widgets 参数)
+@st.cache_resource
 def get_cookie_manager():
     return stx.CookieManager(key="cookie_manager_instance")
 
@@ -355,8 +355,12 @@ if not st.session_state.get('user_email'):
             st.session_state.user_name = name
             
             # 写入 Cookie
-            cookie_manager.set("user_email", email, expires_at=datetime.now() + pd.Timedelta(days=30))
-            cookie_manager.set("user_name", name, expires_at=datetime.now() + pd.Timedelta(days=30))
+            expires = datetime.now() + pd.Timedelta(days=30)
+            cookie_manager.set("user_email", email, expires_at=expires)
+            cookie_manager.set("user_name", name, expires_at=expires)
+            
+            # 🌟 关键修复：给浏览器一点时间写入 Cookie，否则刷新太快会没存上
+            time.sleep(1)
             
             st.rerun()
         st.stop()
@@ -680,10 +684,3 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
-
-
-
-
-
-
-
