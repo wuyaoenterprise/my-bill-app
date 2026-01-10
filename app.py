@@ -11,7 +11,7 @@ from streamlit_oauth import OAuth2Component
 import extra_streamlit_components as stx
 
 # ==========================================
-# 🏗️ 1. 底层架构 (Database Models) - 保持不变
+# 🏗️ 1. 底层架构 (Database Models)
 # ==========================================
 Base = declarative_base()
 
@@ -82,13 +82,12 @@ def get_db_engine():
 engine = get_db_engine()
 Base.metadata.create_all(engine)
 
-# ⚠️ 关键修改：使用 scoped_session 实现线程隔离
-# 这能确保每个用户的操作都在独立的 DB 会话中，互不干扰，彻底解决延迟
+# 使用 scoped_session 实现线程隔离
 session_factory = sessionmaker(bind=engine)
 Session = scoped_session(session_factory)
 
 # ==========================================
-# 🧠 2. 核心财务引擎 - 保持完全不变
+# 🧠 2. 核心财务引擎
 # ==========================================
 class FinanceEngine:
     @staticmethod
@@ -137,19 +136,18 @@ class FinanceEngine:
         return transactions
 
 # ==========================================
-# 🛠️ 3. 业务服务层 (升级：隐私过滤 & Session管理)
+# 🛠️ 3. 业务服务层
 # ==========================================
-# 辅助装饰器：自动管理 Session 生命周期
 def with_session(func):
     def wrapper(*args, **kwargs):
-        session = Session() # 获取当前线程的 session
+        session = Session() 
         try:
             return func(session, *args, **kwargs)
         except Exception as e:
             session.rollback()
             raise e
         finally:
-            session.close() # 必须关闭以释放连接池
+            session.close() 
     return wrapper
 
 class GroupService:
@@ -160,24 +158,19 @@ class GroupService:
             grp = Group(id=str(uuid.uuid4()), name=name)
             session.add(grp)
             
-            # 确保当前用户也在列表里
             current_email = st.session_state.user_email
             if current_email not in user_emails:
                 user_emails.append(current_email)
             
-            # 核心逻辑：遍历邮箱，如果用户不存在，自动创建
             for email in set(user_emails):
-                email = email.strip() # 去除空格
+                email = email.strip()
                 if not email: continue
                 
-                # 检查用户是否存在，不存在则创建（利用 UserService 的逻辑）
-                # 注意：这里我们手动实现一下 ensure，因为在 session 内部调用 service 可能会有嵌套 session 问题
                 u = session.query(User).filter_by(id=email).first()
                 if not u:
-                    u = User(id=email, username=email.split('@')[0]) # 默认用邮箱前缀做用户名
+                    u = User(id=email, username=email.split('@')[0])
                     session.add(u)
                 
-                # 添加到群组
                 session.add(GroupMember(group_id=grp.id, user_id=email))
             
             session.commit()
@@ -188,7 +181,6 @@ class GroupService:
     @staticmethod
     @with_session
     def delete_group(session, group_id):
-        # 增加权限校验：只有群成员能删吗？暂时保持原逻辑
         grp = session.query(Group).filter_by(id=group_id).first()
         if grp:
             grp.is_deleted = True
@@ -199,7 +191,6 @@ class GroupService:
     @staticmethod
     @with_session
     def get_my_groups(session, user_email):
-        """核心隔离：只查询我所在的群组"""
         return session.query(Group).join(GroupMember).filter(
             GroupMember.user_id == user_email,
             Group.is_deleted == False
@@ -236,7 +227,6 @@ class ExpenseService:
     def create_repayment(payer_id, receiver_id, amount_cents, group_id, custom_time=None):
         payer_splits = {payer_id: amount_cents}
         ower_splits = {receiver_id: amount_cents}
-        # 复用上面的 create_expense，不需要 @with_session 因为它会调用带装饰器的函数
         return ExpenseService.create_expense(
             "还款", amount_cents, group_id, payer_id, "Repayment", payer_splits, ower_splits, custom_time
         )
@@ -270,13 +260,11 @@ class UserService:
     @staticmethod
     @with_session
     def get_all(session): 
-        # 获取所有用户用于拉人进群
         return session.query(User).all()
         
     @staticmethod
     @with_session
     def ensure_user_exists(session, email, name=None):
-        """登录时确保用户在数据库中"""
         u = session.query(User).filter_by(id=email).first()
         if not u:
             username = name if name else email.split('@')[0]
@@ -300,14 +288,10 @@ if not CLIENT_ID or not CLIENT_SECRET:
     st.error("请先在 secrets.toml 配置 Google OAuth 信息")
     st.stop()
 
-# 1. 初始化 Cookie 管理器 (🌟 修复点：去掉了 experimental_allow_widgets 参数)
-@st.cache_resource
-def get_cookie_manager():
-    return stx.CookieManager(key="cookie_manager_instance")
+# 🌟 核心修复：直接实例化 CookieManager，不要加 @st.cache_resource
+cookie_manager = stx.CookieManager(key="cookie_manager_instance")
 
-cookie_manager = get_cookie_manager()
-
-# 2. 尝试读取 Cookie (加个 try-except 防止组件报错卡死)
+# 2. 尝试读取 Cookie
 try:
     cookie_email = cookie_manager.get(cookie="user_email")
     cookie_name = cookie_manager.get(cookie="user_name")
@@ -322,17 +306,15 @@ if not st.session_state.get('user_email'):
         st.session_state.user_email = cookie_email
         st.session_state.user_name = cookie_name
         UserService.ensure_user_exists(cookie_email, cookie_name)
-        st.rerun() # 自动刷新进入
+        st.rerun() 
     
     # B. 显示登录按钮
     else:
         st.title("💸 聚会分账系统 - 登录")
         st.caption("请登录以查看属于您的私有数据")
         
-        # 修复：给按钮加个 key，确保它能渲染出来
         oauth2 = OAuth2Component(CLIENT_ID, CLIENT_SECRET, "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://oauth2.googleapis.com/token", REDIRECT_URI)
         
-        # 这里的 key="google_login_btn" 很关键
         result = oauth2.authorize_button(
             name="使用 Google 登录", 
             scope="openid email profile", 
@@ -359,9 +341,7 @@ if not st.session_state.get('user_email'):
             cookie_manager.set("user_email", email, expires_at=expires)
             cookie_manager.set("user_name", name, expires_at=expires)
             
-            # 🌟 关键修复：给浏览器一点时间写入 Cookie，否则刷新太快会没存上
             time.sleep(1)
-            
             st.rerun()
         st.stop()
 
@@ -378,7 +358,6 @@ with st.sidebar:
     st.title("💸 聚会分账系统")
     st.success(f"已登录: {current_u_name}")
     
-    # 修改后的退出逻辑
     if st.button("退出登录"):
         # 1. 删除 Cookie
         cookie_manager.delete("user_email")
@@ -390,14 +369,11 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    
     nav = st.radio("功能导航", ["📊 仪表盘 & 动态", "📝 记一笔 (支出)", "💸 还款 (结算)", "⚙️ 设置"])
-    
     st.divider()
-    # 隐私隔离：这里的全员列表仅用于展示，实际操作由 current_u_email 决定
     all_users = UserService.get_all() 
 
-# 核心修改：只获取我所在的群组
+# 只获取我所在的群组
 my_groups = GroupService.get_my_groups(current_u_email)
 
 # --- 1. 仪表盘 & 动态 ---
@@ -429,7 +405,7 @@ if nav == "📊 仪表盘 & 动态":
 
             st.divider()
             
-            # B. 最近动态 (逻辑保持不变)
+            # B. 最近动态
             st.markdown("**🕒 最近动态 (按时间倒序)**")
             activities = ExpenseService.get_activity(grp.id)
             if not activities:
@@ -464,25 +440,19 @@ elif nav == "📝 记一笔 (支出)":
     members = [m.user.username for m in grp.members]
     m_ids = {m.user.username: m.user.id for m in grp.members}
     
-    # 🟢 第一部分：基础信息（放在外面，方便实时更新）
     with st.container(border=True):
         c1, c2, c3 = st.columns(3)
         desc = c1.text_input("消费内容", "聚餐")
-        # min_value=0.0 修复报错
         amt = c2.number_input("总金额", min_value=0.0, step=1.0, value=0.0, key='total_amt') 
         cat = c3.selectbox("分类", ["餐饮", "交通", "房租", "购物", "娱乐", "其他"])
-        
         c4, c5 = st.columns(2)
         d_date = c4.date_input("日期", date.today())
         d_time = c5.time_input("时间", datetime.now().time())
 
     st.divider()
-
-    # 🟢 第二部分：模式选择（必须放在 Form 外面，否则点不动！）
     st.subheader("1. 谁先垫付的?")
     pay_mode = st.radio("付款方式", ["单人垫付", "多人付款"], horizontal=True)
     
-    # 这里的逻辑需要放在 form 外面，以便界面响应
     payer_splits = {}
     payer = None
     if pay_mode == "单人垫付":
@@ -490,14 +460,10 @@ elif nav == "📝 记一笔 (支出)":
         payer = st.selectbox("付款人", members, index=default_idx)
     
     st.divider()
-
     st.subheader("2. 怎么分 (谁该给钱)?")
-    # 关键：这个 Radio 放在外面，一点就会刷新界面！
     split_method = st.radio("分账模式", ["🏁 均分 (Equal)", "🔢 按份数 (Shares)", "💯 按百分比 (%)", "💵 具体金额"], horizontal=True)
 
-    # 🟢 第三部分：具体数据的填写（放入 Form 统一提交）
     with st.form("expense_form"):
-        # A. 处理多人付款的输入框 (如果是单人，这里不显示)
         if pay_mode == "多人付款":
             st.caption("输入垫付金额：")
             pay_cols = st.columns(len(members))
@@ -505,19 +471,14 @@ elif nav == "📝 记一笔 (支出)":
                 val = pay_cols[i].number_input(f"{m} 付了", min_value=0.0, step=1.0, key=f"pay_{m}")
                 if val > 0: payer_splits[m_ids[m]] = FinanceEngine.to_cents(val)
         elif pay_mode == "单人垫付" and payer:
-            # 单人模式在提交时自动计算，这里不需要输入框
             pass
 
-        # B. 处理分账模式的输入框
         ower_splits = {}
         total_cents = FinanceEngine.to_cents(amt)
-        
-        # 变量初始化，防止报错
         weights = []
         active_members = []
         pcts = []
         
-        # --- 逻辑 A: 均分 (直接显示结果) ---
         if split_method == "🏁 均分 (Equal)":
             involved = st.multiselect("选择参与人", members, default=members)
             if involved and total_cents > 0:
@@ -532,7 +493,6 @@ elif nav == "📝 记一笔 (支出)":
             elif total_cents == 0:
                 st.warning("⚠️ 请先在最上面输入【总金额】")
 
-        # --- 逻辑 B: 按份数 (显示输入框) ---     
         elif split_method == "🔢 按份数 (Shares)":
             st.info("例如：A 吃了 2 份，B 吃了 1 份")
             cols = st.columns(len(members))
@@ -541,7 +501,6 @@ elif nav == "📝 记一笔 (支出)":
                 weights.append(w)
                 active_members.append(m)
 
-        # --- 逻辑 C: 百分比 (显示输入框) ---
         elif split_method == "💯 按百分比 (%)":
             st.info("请输入百分比 (总和需为 100%)")
             cols = st.columns(len(members))
@@ -549,7 +508,6 @@ elif nav == "📝 记一笔 (支出)":
                 p = cols[i].number_input(f"{m} (%)", min_value=0.0, max_value=100.0, step=5.0, key=f"pct_{m}")
                 pcts.append(p)
 
-        # --- 逻辑 D: 具体金额 (显示输入框) ---
         elif split_method == "💵 具体金额":
             st.caption("手动输入每个人应付的金额")
             cols = st.columns(len(members))
@@ -558,16 +516,13 @@ elif nav == "📝 记一笔 (支出)":
                 c = FinanceEngine.to_cents(val)
                 if c > 0: ower_splits[m_ids[m]] = c
         
-        # --- 提交按钮 ---
-        st.write("") # 留点空隙
+        st.write("") 
         submitted = st.form_submit_button("✅ 确认记账", type="primary")
         
         if submitted:
-            # 1. 补充付款人数据 (如果是单人垫付)
             if pay_mode == "单人垫付":
                 payer_splits = {m_ids[payer]: total_cents}
             
-            # 2. 补充计算逻辑 (针对 Form 内部填写的数据)
             if split_method == "🔢 按份数 (Shares)":
                 if sum(weights) > 0:
                     amounts = FinanceEngine.distribute_amount(total_cents, weights)
@@ -584,7 +539,6 @@ elif nav == "📝 记一笔 (支出)":
                     st.error(f"百分比总和必须是 100%，当前是 {sum(pcts)}%")
                     st.stop()
 
-            # 3. 最终校验并提交
             if not payer_splits:
                 st.error("必须有付款人")
             elif not ower_splits:
@@ -611,7 +565,6 @@ elif nav == "💸 还款 (结算)":
     m_ids_s = {m.user.username: m.user.id for m in grp_s.members}
     
     c1, c2, c3 = st.columns(3)
-    # 智能默认值：如果我是成员，付款人默认是我
     payer_s = c1.selectbox("付款人", members_s, index=members_s.index(current_u_name) if current_u_name in members_s else 0)
     receiver_s = c2.selectbox("收款人", members_s, index=1 if len(members_s)>1 else 0)
     amt_s = c3.number_input("还款金额", min_value=0.01, step=1.0)
@@ -633,37 +586,24 @@ elif nav == "💸 还款 (结算)":
             st.rerun()
 
 # --- 4. 设置 ---
-# ... 之前的代码 ...
-
 elif nav == "⚙️ 设置":
     st.subheader("创建新群组")
     n_grp = st.text_input("群名")
-    
-    # 方式 A: 从已存在的用户里选
     others = [u.username for u in all_users if u.id != current_u_email]
     invites_existing = st.multiselect("选择已注册成员", others)
-    
-    # 方式 B: 直接输入邮箱 (新增功能)
     st.markdown("**或者直接输入朋友的 Google 邮箱 (一行一个):**")
     invite_emails_raw = st.text_area("邮箱列表", placeholder="friend1@gmail.com\nfriend2@gmail.com")
     
     if st.button("建群"):
         if n_grp:
-            # 1. 获取已选用户的邮箱 (ID)
             selected_emails = [u.id for u in all_users if u.username in invites_existing]
-            
-            # 2. 获取手填的邮箱
             manual_emails = [e.strip() for e in invite_emails_raw.split('\n') if '@' in e]
-            
-            # 3. 合并所有邀请名单
             final_invite_list = selected_emails + manual_emails
-            
-            # 调用升级版的 create_group
             success, msg = GroupService.create_group(n_grp, final_invite_list)
             
             if success:
                 st.success(f"成功创建群组: {n_grp}")
-                time.sleep(1) # 给一点时间让数据写入
+                time.sleep(1)
                 st.rerun()
             else:
                 st.error(f"创建失败: {msg}")
@@ -671,7 +611,6 @@ elif nav == "⚙️ 设置":
             st.warning("请输入群名")
 
     st.divider()
-
     st.subheader("删除群组")
     if my_groups:
         del_g = st.selectbox("选择删除", [g.name for g in my_groups])
@@ -682,5 +621,4 @@ elif nav == "⚙️ 设置":
     else:
         st.info("没有可删除的群组")
         
-# 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
