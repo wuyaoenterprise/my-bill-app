@@ -7,7 +7,8 @@ import uuid
 import collections
 import heapq
 import time
-from streamlit_oauth import OAuth2Component # 新增：用于登录
+from streamlit_oauth import OAuth2Component
+import extra_streamlit_components as stx
 
 # ==========================================
 # 🏗️ 1. 底层架构 (Database Models) - 保持不变
@@ -290,7 +291,7 @@ class UserService:
 st.set_page_config(page_title="Splitwise Ultimate Pro", page_icon="💸", layout="wide")
 st.markdown("<style>.big-font {font-size:18px !important;}</style>", unsafe_allow_html=True)
 
-# --- 🔐 身份验证模块 (新增) ---
+# --- 🔐 身份验证 & Cookie 保持登录模块 ---
 CLIENT_ID = st.secrets.get("GOOGLE_CLIENT_ID")
 CLIENT_SECRET = st.secrets.get("GOOGLE_CLIENT_SECRET")
 REDIRECT_URI = st.secrets.get("GOOGLE_REDIRECT_URI")
@@ -299,30 +300,54 @@ if not CLIENT_ID or not CLIENT_SECRET:
     st.error("请先在 secrets.toml 配置 Google OAuth 信息")
     st.stop()
 
-if 'user_email' not in st.session_state:
-    st.title("💸 聚会分账系统 - 登录")
-    st.caption("请登录以查看属于您的私有数据")
+# 1. 初始化 Cookie 管理器 (只需运行一次)
+@st.cache_resource(experimental_allow_widgets=True)
+def get_cookie_manager():
+    return stx.CookieManager()
+
+cookie_manager = get_cookie_manager()
+
+# 2. 尝试从 Cookie 获取登录信息
+cookie_email = cookie_manager.get(cookie="user_email")
+cookie_name = cookie_manager.get(cookie="user_name")
+
+# 3. 登录逻辑判断
+if not st.session_state.get('user_email'):
+    # A. 如果 Cookie 里有数据，直接自动登录 (跳过按钮)
+    if cookie_email and cookie_name:
+        st.session_state.user_email = cookie_email
+        st.session_state.user_name = cookie_name
+        UserService.ensure_user_exists(cookie_email, cookie_name)
+        # 不用 rerun，直接向下执行即可
     
-    oauth2 = OAuth2Component(CLIENT_ID, CLIENT_SECRET, "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://oauth2.googleapis.com/token", REDIRECT_URI)
-    result = oauth2.authorize_button(name="使用 Google 登录", scope="openid email profile", redirect_uri=REDIRECT_URI)
-    
-    if result and result.get("token"):
-        # 解码 token 获取邮箱 (简单起见，这里假设 token 包含 id_token)
-        # 实际生产中建议使用 jwt 库解码 id_token
-        import base64, json
-        id_token = result["token"]["id_token"]
-        payload = id_token.split('.')[1]
-        padded = payload + '=' * (4 - len(payload) % 4)
-        decoded = json.loads(base64.urlsafe_b64decode(padded))
+    # B. 如果 Cookie 没数据，才显示 Google 登录按钮
+    else:
+        st.title("💸 聚会分账系统 - 登录")
+        st.caption("请登录以查看属于您的私有数据")
         
-        email = decoded.get("email")
-        name = decoded.get("name")
+        oauth2 = OAuth2Component(CLIENT_ID, CLIENT_SECRET, "https://accounts.google.com/o/oauth2/v2/auth", "https://oauth2.googleapis.com/token", "https://oauth2.googleapis.com/token", REDIRECT_URI)
+        result = oauth2.authorize_button(name="使用 Google 登录", scope="openid email profile", redirect_uri=REDIRECT_URI)
         
-        UserService.ensure_user_exists(email, name)
-        st.session_state.user_email = email
-        st.session_state.user_name = name
-        st.rerun()
-    st.stop() # 未登录停止向下执行
+        if result and result.get("token"):
+            import base64, json
+            id_token = result["token"]["id_token"]
+            payload = id_token.split('.')[1]
+            padded = payload + '=' * (4 - len(payload) % 4)
+            decoded = json.loads(base64.urlsafe_b64decode(padded))
+            
+            email = decoded.get("email")
+            name = decoded.get("name")
+            
+            UserService.ensure_user_exists(email, name)
+            st.session_state.user_email = email
+            st.session_state.user_name = name
+            
+            # 🌟 关键：登录成功后，写入 Cookie (有效期 30 天)
+            cookie_manager.set("user_email", email, expires_at=datetime.now() + pd.Timedelta(days=30))
+            cookie_manager.set("user_name", name, expires_at=datetime.now() + pd.Timedelta(days=30))
+            
+            st.rerun()
+        st.stop()
 
 # --- 登录成功后的主逻辑 ---
 current_u_email = st.session_state.user_email
@@ -336,11 +361,20 @@ if 'page' not in st.session_state: st.session_state.page = "dashboard"
 with st.sidebar:
     st.title("💸 聚会分账系统")
     st.success(f"已登录: {current_u_name}")
+    
+    # 修改后的退出逻辑
     if st.button("退出登录"):
-        del st.session_state.user_email
+        # 1. 删除 Cookie
+        cookie_manager.delete("user_email")
+        cookie_manager.delete("user_name")
+        # 2. 清除 session
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        # 3. 刷新页面
         st.rerun()
 
     st.divider()
+    
     nav = st.radio("功能导航", ["📊 仪表盘 & 动态", "📝 记一笔 (支出)", "💸 还款 (结算)", "⚙️ 设置"])
     
     st.divider()
@@ -634,6 +668,7 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
+
 
 
 
