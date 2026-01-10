@@ -404,7 +404,7 @@ if nav == "📊 仪表盘 & 动态":
                                 ExpenseService.delete_expense(exp.id)
                                 st.rerun()
 
-# --- 2. 记一笔 (支出) ---
+# --- 2. 记一笔 (支出)
 elif nav == "📝 记一笔 (支出)":
     st.header("📝 记录支出")
     if not my_groups: st.stop()
@@ -414,31 +414,34 @@ elif nav == "📝 记一笔 (支出)":
     members = [m.user.username for m in grp.members]
     m_ids = {m.user.username: m.user.id for m in grp.members}
     
-    with st.form("expense"):
-        # 基本信息
+    # 将表单逻辑拆分，以便动态计算展示
+    # 注意：为了让交互更流畅，我们在 form 外部先处理一部分逻辑
+    
+    with st.container(border=True):
         c1, c2, c3 = st.columns(3)
         desc = c1.text_input("消费内容", "聚餐")
-        amt = c2.number_input("总金额", min_value=0.01, step=1.0)
+        # key='total_amt' 用于后续自动计算
+        amt = c2.number_input("总金额", min_value=0.01, step=1.0, value=0.0, key='total_amt') 
         cat = c3.selectbox("分类", ["餐饮", "交通", "房租", "购物", "娱乐", "其他"])
         
         c4, c5 = st.columns(2)
         d_date = c4.date_input("日期", date.today())
         d_time = c5.time_input("时间", datetime.now().time())
-        
-        st.divider()
-        
+
+    st.divider()
+
+    with st.form("expense_form"):
         # --- 1. 付款方 ---
-        st.subheader("1. 谁付的钱?")
+        st.subheader("1. 谁先垫付的?")
         pay_mode = st.radio("付款方式", ["单人垫付", "多人付款"], horizontal=True)
         payer_splits = {} 
         
         if pay_mode == "单人垫付":
-            # 默认选中当前登录用户
             default_idx = members.index(current_u_name) if current_u_name in members else 0
             payer = st.selectbox("付款人", members, index=default_idx)
-            payer_splits[m_ids[payer]] = FinanceEngine.to_cents(amt)
+            # 在提交时才计算金额，防止刷新重置
         else:
-            st.caption("输入每个人支付的金额：")
+            st.caption("输入垫付金额：")
             cols = st.columns(len(members))
             for i, m in enumerate(members):
                 val = cols[i].number_input(f"{m} 付了", min_value=0.0, step=1.0, key=f"pay_{m}")
@@ -446,21 +449,34 @@ elif nav == "📝 记一笔 (支出)":
 
         st.divider()
 
-        # --- 2. 分摊方 (保持原有4种模式) ---
-        st.subheader("2. 怎么分?")
+        # --- 2. 分摊方 (修复显示逻辑) ---
+        st.subheader("2. 怎么分 (谁该给钱)?")
+        # 使用 key 保持状态
         split_method = st.radio("分账模式", ["🏁 均分 (Equal)", "🔢 按份数 (Shares)", "💯 按百分比 (%)", "💵 具体金额"], horizontal=True)
         
+        involved = members # 默认全员
         ower_splits = {}
-        total_cents = FinanceEngine.to_cents(amt)
+        total_cents = FinanceEngine.to_cents(amt) # 使用外面填写的总金额
         
+        # --- 逻辑 A: 均分 (增加可视化显示) ---
         if split_method == "🏁 均分 (Equal)":
             involved = st.multiselect("选择参与人", members, default=members)
-            if involved:
+            if involved and total_cents > 0:
                 weights = [1] * len(involved)
                 amounts = FinanceEngine.distribute_amount(total_cents, weights)
+                
+                # 🌟 新增：直接显示计算结果，不用你猜
+                st.info("👇 自动计算结果 (无需手动填写):")
+                preview_cols = st.columns(len(involved))
                 for i, m in enumerate(involved):
+                    # 存入数据
                     ower_splits[m_ids[m]] = amounts[i]
-                    
+                    # 显示出来
+                    preview_cols[i].metric(label=m, value=f"{FinanceEngine.to_dollars(amounts[i])}元")
+            elif total_cents == 0:
+                st.warning("⚠️ 请先在上面输入【总金额】")
+
+        # --- 逻辑 B: 按份数 ---     
         elif split_method == "🔢 按份数 (Shares)":
             st.info("例如：A 吃了 2 份，B 吃了 1 份")
             cols = st.columns(len(members))
@@ -471,48 +487,58 @@ elif nav == "📝 记一笔 (支出)":
                 weights.append(w)
                 active_members.append(m)
             
-            if sum(weights) > 0:
-                amounts = FinanceEngine.distribute_amount(total_cents, weights)
-                for i, m in enumerate(active_members):
-                    if amounts[i] > 0: ower_splits[m_ids[m]] = amounts[i]
+            # 在这里我们不预先计算，等到提交按钮按下后再算，因为 inputs 在 form 里
 
+        # --- 逻辑 C: 百分比 ---
         elif split_method == "💯 按百分比 (%)":
             cols = st.columns(len(members))
             pcts = []
             for i, m in enumerate(members):
                 p = cols[i].number_input(f"{m} (%)", min_value=0.0, max_value=100.0, step=5.0, key=f"pct_{m}")
                 pcts.append(p)
-            
-            if abs(sum(pcts) - 100.0) < 0.01:
-                weights = [int(p*100) for p in pcts] 
-                amounts = FinanceEngine.distribute_amount(total_cents, weights)
-                for i, m in enumerate(members):
-                    if amounts[i] > 0: ower_splits[m_ids[m]] = amounts[i]
-            else:
-                st.error(f"当前总和: {sum(pcts)}%，必须等于 100%")
 
+        # --- 逻辑 D: 具体金额 ---
         elif split_method == "💵 具体金额":
-            st.caption("手动输入应付金额")
+            st.caption("手动输入每个人应付的金额")
             cols = st.columns(len(members))
-            input_sum = 0
             for i, m in enumerate(members):
+                # 这里允许用户手动输入
                 val = cols[i].number_input(f"{m} 应付", min_value=0.0, step=1.0, key=f"exact_{m}")
                 c = FinanceEngine.to_cents(val)
-                if c > 0:
-                    ower_splits[m_ids[m]] = c
-                    input_sum += c
-            if input_sum != total_cents:
-                st.error(f"还有 {FinanceEngine.to_dollars(total_cents - input_sum)} 未分配")
+                if c > 0: ower_splits[m_ids[m]] = c
         
-        # --- 3. 提交 ---
-        if st.form_submit_button("✅ 确认记账", type="primary"):
+        # --- 3. 提交按钮 ---
+        submitted = st.form_submit_button("✅ 确认记账", type="primary")
+        
+        if submitted:
+            # 1. 补充付款人数据 (如果是单人垫付)
+            if pay_mode == "单人垫付":
+                payer_splits = {m_ids[payer]: total_cents}
+            
+            # 2. 补充计算逻辑 (针对 Form 内部的数据)
+            if split_method == "🔢 按份数 (Shares)":
+                if sum(weights) > 0:
+                    amounts = FinanceEngine.distribute_amount(total_cents, weights)
+                    for i, m in enumerate(active_members):
+                        if amounts[i] > 0: ower_splits[m_ids[m]] = amounts[i]
+            
+            elif split_method == "💯 按百分比 (%)":
+                if abs(sum(pcts) - 100.0) < 0.01:
+                    weights = [int(p*100) for p in pcts]
+                    amounts = FinanceEngine.distribute_amount(total_cents, weights)
+                    for i, m in enumerate(members):
+                        if amounts[i] > 0: ower_splits[m_ids[m]] = amounts[i]
+                else:
+                    st.error(f"百分比总和必须是 100%，当前是 {sum(pcts)}%")
+                    st.stop()
+
+            # 3. 最终校验
             if not payer_splits:
                 st.error("必须有付款人")
             elif not ower_splits:
-                st.error("必须有分摊人")
+                st.error("分摊金额为 0，请检查输入")
             else:
                 final_dt = datetime.combine(d_date, d_time)
-                # 使用当前登录用户作为 created_by
                 success, msg = ExpenseService.create_expense(desc, total_cents, grp.id, current_u_email, cat, payer_splits, ower_splits, final_dt)
                 if success:
                     st.balloons()
@@ -606,4 +632,5 @@ elif nav == "⚙️ 设置":
         
 # 扫尾工作：移除当前线程的 session，防止内存泄漏
 Session.remove()
+
 
